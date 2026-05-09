@@ -9,6 +9,8 @@ from app.schemas import SupportAnalysis
 
 
 DEFAULT_MODEL = "gpt-4.1-mini"
+DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
+DEV_ENVIRONMENT = "dev"
 
 SYSTEM_INSTRUCTIONS = """
 You are a senior support engineer. Analyze support tickets and application logs.
@@ -19,8 +21,8 @@ Return only valid JSON with this shape:
   "severity": "string or null",
   "affected_components": ["string"],
   "evidence": ["short facts quoted or paraphrased from the supplied files"],
-  "debugging_steps": [{"step": "string", "rationale": "string or null"}],
-  "customer_response": "string or null"
+  "customer_facing_explanation": "string or null",
+  "debugging_steps": [{"step": "string", "rationale": "string or null"}]
 }
 
 Be concrete, avoid inventing facts, and prioritize steps a support engineer can run next.
@@ -32,6 +34,15 @@ def get_model() -> str:
     return os.getenv("OPENAI_MODEL", DEFAULT_MODEL)
 
 
+def get_embedding_model() -> str:
+    return os.getenv("OPENAI_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
+
+
+def is_dev_environment() -> bool:
+    environment = os.getenv("APP_ENV")
+    return environment is not None and environment.strip().lower() == DEV_ENVIRONMENT
+
+
 def get_client() -> AsyncOpenAI:
     if not os.getenv("OPENAI_API_KEY"):
         raise HTTPException(
@@ -41,6 +52,28 @@ def get_client() -> AsyncOpenAI:
     return AsyncOpenAI()
 
 
+async def create_embedding(text: str) -> list[float]:
+    return (await embed_texts([text]))[0]
+
+
+async def embed_texts(texts: list[str]) -> list[list[float]]:
+    if not texts:
+        return []
+
+    client = get_client()
+    try:
+        response = await client.embeddings.create(
+            model=get_embedding_model(),
+            input=texts,
+        )
+    except (APIConnectionError, APITimeoutError) as exc:
+        raise RuntimeError(f"Could not reach OpenAI embeddings API: {exc}") from exc
+    except APIStatusError as exc:
+        raise RuntimeError(f"OpenAI embeddings API error {exc.status_code}: {exc.message}") from exc
+
+    return [item.embedding for item in response.data]
+
+
 def build_prompt(ticket_text: str | None, log_text: str | None, runbook_text: str | None) -> str:
     sections = []
     if ticket_text:
@@ -48,7 +81,7 @@ def build_prompt(ticket_text: str | None, log_text: str | None, runbook_text: st
     if log_text:
         sections.append(f"<logs>\n{log_text}\n</logs>")
     if runbook_text:
-        sections.append(f"<runbooks>\n{runbook_text}\n</runbooks>")
+        sections.append(f"<retrieved_support_knowledge>\n{runbook_text}\n</retrieved_support_knowledge>")
     return "\n\n".join(sections)
 
 
@@ -85,12 +118,51 @@ def _parse_analysis(text: str) -> SupportAnalysis:
     return analysis
 
 
+def _mock_analysis(ticket_text: str | None, log_text: str | None, runbook_text: str | None) -> SupportAnalysis:
+    provided_sources = []
+    if ticket_text:
+        provided_sources.append("support ticket")
+    if log_text:
+        provided_sources.append("logs")
+    if runbook_text:
+        provided_sources.append("runbooks")
+
+    sources = ", ".join(provided_sources) if provided_sources else "no source text"
+    payload = {
+        "issue_summary": f"Mock development analysis generated from {sources}.",
+        "likely_cause": "Mock response: no OpenAI API call was made because APP_ENV is set to a development value.",
+        "severity": "mock",
+        "affected_components": ["development"],
+        "evidence": [
+            "Development mock mode is enabled.",
+            f"Received {len(ticket_text or '')} ticket characters and {len(log_text or '')} log characters.",
+        ],
+        "debugging_steps": [
+            {
+                "step": "Set APP_ENV to a non-development value to call the OpenAI API.",
+                "rationale": "Development mode intentionally returns a local mock response.",
+            },
+            {
+                "step": "Configure OPENAI_API_KEY before testing production-like behavior.",
+                "rationale": "The real OpenAI client requires an API key.",
+            },
+        ],
+    }
+
+    analysis = SupportAnalysis.model_validate(payload)
+    analysis.raw_model_output = payload
+    return analysis
+
+
 async def analyze_support_context(
     ticket_text: str | None,
     log_text: str | None,
     runbook_text: str | None,
 ) -> tuple[str | None, str, SupportAnalysis]:
     model = get_model()
+    if is_dev_environment():
+        return "mock-response-dev", model, _mock_analysis(ticket_text, log_text, runbook_text)
+
     client = get_client()
 
     try:

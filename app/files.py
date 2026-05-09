@@ -10,9 +10,7 @@ MAX_UPLOAD_BYTES = 5 * 1024 * 1024
 ALLOWED_CONTENT_TYPES = {
     "text/plain",
     "text/markdown",
-    "application/octet-stream",
-    "application/rtf",
-    "text/rtf",
+    "application/octet-stream"
 }
 
 
@@ -32,7 +30,7 @@ async def read_upload(file: UploadFile, kind: str) -> UploadedDocument:
     if content_type not in ALLOWED_CONTENT_TYPES:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail=f"{file.filename} has unsupported content type {content_type}. Upload text, markdown, log, or RTF files.",
+            detail=f"{file.filename} has unsupported content type {content_type}. Upload text, markdown, or log files.",
         )
 
     data = await file.read()
@@ -42,7 +40,7 @@ async def read_upload(file: UploadFile, kind: str) -> UploadedDocument:
             detail=f"{file.filename} is larger than {MAX_UPLOAD_BYTES // (1024 * 1024)}MB.",
         )
 
-    text = _decode_text(data)
+    text = decode_text(data)
     if not text.strip():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -60,7 +58,7 @@ def combine_documents(documents: list[UploadedDocument]) -> str | None:
     )
 
 
-def _decode_text(data: bytes) -> str:
+def decode_text(data: bytes) -> str:
     for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
         try:
             decoded = data.decode(encoding)
@@ -70,19 +68,4 @@ def _decode_text(data: bytes) -> str:
     else:
         decoded = data.decode("utf-8", errors="replace")
 
-    if decoded.lstrip().startswith(r"{\rtf"):
-        return _strip_rtf(decoded)
     return decoded.strip()
-
-
-def _strip_rtf(text: str) -> str:
-    text = re.sub(r"{\\fonttbl.*?}", "", text, flags=re.DOTALL)
-    text = re.sub(r"{\\colortbl.*?}", "", text, flags=re.DOTALL)
-    text = re.sub(r"{\\\*\\expandedcolortbl.*?}", "", text, flags=re.DOTALL)
-    text = re.sub(r"\\'[0-9a-fA-F]{2}", " ", text)
-    text = re.sub(r"\\[a-zA-Z]+-?\d* ?", "", text)
-    text = text.replace(r"\{", "{").replace(r"\}", "}").replace(r"\\", "\\")
-    text = text.replace("\\\n", "\n")
-    text = re.sub(r"[{}]", "", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()

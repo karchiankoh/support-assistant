@@ -9,6 +9,14 @@ class SourceDocument(BaseModel):
     characters: int
 
 
+class RetrievedSource(BaseModel):
+    filename: str
+    kind: str
+    score: float
+    chunk_index: int
+    text: str
+
+
 class SuggestedStep(BaseModel):
     step: str
     rationale: str | None = None
@@ -21,7 +29,7 @@ class SupportAnalysis(BaseModel):
     affected_components: list[str] = Field(default_factory=list)
     evidence: list[str] = Field(default_factory=list)
     debugging_steps: list[SuggestedStep] = Field(default_factory=list)
-    customer_response: str | None = Field(
+    customer_facing_explanation: str | None = Field(
         None,
         description="Optional support-friendly response that can be sent back to the requester.",
     )
@@ -32,4 +40,5 @@ class AnalysisResponse(BaseModel):
     response_id: str | None = None
     model: str
     sources: list[SourceDocument]
+    retrieved_sources: list[RetrievedSource] = Field(default_factory=list)
     analysis: SupportAnalysis

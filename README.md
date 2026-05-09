@@ -2,6 +2,8 @@
 
 FastAPI backend for uploading support tickets and logs to the OpenAI Responses API. The API returns a concise issue summary, likely cause, evidence, and suggested debugging steps.
 
+Note: this project is vibe coded with Codex.
+
 ## Setup
 
 ```bash
@@ -15,19 +17,27 @@ Optional:
 
 ```bash
 export OPENAI_MODEL="gpt-4.1-mini"
+export OPENAI_EMBEDDING_MODEL="text-embedding-3-small"
+export SUPPORT_KB_DB_PATH="data/support_knowledge.db"
+```
+
+For local development without calling the OpenAI API:
+
+```bash
+export APP_ENV="dev"
 ```
 
 ## Run
 
 ```bash
-uvicorn app.main:app --reload
+fastapi dev
 ```
 
 Open `http://127.0.0.1:8000/docs` for the interactive API docs.
 
 ## Endpoints
 
-- `GET /health` checks the service and configured model.
+- `GET /health` checks the service, configured model, and local knowledge database status.
 - `POST /analyze` accepts a ticket, one or more logs, or both.
 
 Example:
@@ -36,4 +46,26 @@ Example:
 curl -X POST http://127.0.0.1:8000/analyze \
   -F "ticket=@data/tickets/ticket1.txt" \
   -F "logs=@data/logs/main1.log"
+```
+
+## SQLite Retrieval
+
+Reusable support knowledge, such as runbooks and past incidents, is embedded with OpenAI and stored locally in SQLite. The `/analyze` endpoint retrieves matching chunks automatically and passes them to the Responses API as hidden support context.
+
+Build or refresh the local index:
+
+```bash
+python scripts/ingest_knowledge.py
+```
+
+By default, the script indexes:
+
+- `data/runbooks`
+- `data/incidents`
+
+Retrieval settings:
+
+```bash
+export SUPPORT_KB_TOP_K="4"
+export SUPPORT_KB_MIN_SCORE="0.2"
 ```
