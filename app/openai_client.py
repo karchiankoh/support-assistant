@@ -1,6 +1,9 @@
+import asyncio
 import json
 import os
-from typing import Any
+import random
+from collections.abc import Awaitable, Callable
+from typing import Any, TypeVar
 
 from fastapi import HTTPException, status
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
@@ -10,7 +13,11 @@ from app.schemas import SupportAnalysis
 
 DEFAULT_MODEL = "gpt-4.1-mini"
 DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
+DEFAULT_OPENAI_RETRY_ATTEMPTS = 3
+DEFAULT_OPENAI_RETRY_BACKOFF_SECONDS = 0.5
 DEV_ENVIRONMENT = "dev"
+RETRYABLE_OPENAI_STATUS_CODES = (408, 409, 429, 500, 502, 503, 504)
+T = TypeVar("T")
 
 SYSTEM_INSTRUCTIONS = """
 You are a senior support engineer. Analyze support tickets and application logs.
@@ -38,6 +45,17 @@ def get_embedding_model() -> str:
     return os.getenv("OPENAI_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
 
 
+def get_openai_retry_attempts() -> int:
+    return max(1, int(os.getenv("OPENAI_RETRY_ATTEMPTS", str(DEFAULT_OPENAI_RETRY_ATTEMPTS))))
+
+
+def get_openai_retry_backoff_seconds() -> float:
+    return max(
+        0.0,
+        float(os.getenv("OPENAI_RETRY_BACKOFF_SECONDS", str(DEFAULT_OPENAI_RETRY_BACKOFF_SECONDS))),
+    )
+
+
 def is_dev_environment() -> bool:
     environment = os.getenv("APP_ENV")
     return environment is not None and environment.strip().lower() == DEV_ENVIRONMENT
@@ -62,9 +80,11 @@ async def embed_texts(texts: list[str]) -> list[list[float]]:
 
     client = get_client()
     try:
-        response = await client.embeddings.create(
-            model=get_embedding_model(),
-            input=texts,
+        response = await _call_openai_with_retries(
+            lambda: client.embeddings.create(
+                model=get_embedding_model(),
+                input=texts,
+            )
         )
     except (APIConnectionError, APITimeoutError) as exc:
         raise RuntimeError(f"Could not reach OpenAI embeddings API: {exc}") from exc
@@ -166,11 +186,13 @@ async def analyze_support_context(
     client = get_client()
 
     try:
-        response = await client.responses.create(
-            model=model,
-            instructions=SYSTEM_INSTRUCTIONS,
-            input=build_prompt(ticket_text, log_text, runbook_text),
-            temperature=0.2,
+        response = await _call_openai_with_retries(
+            lambda: client.responses.create(
+                model=model,
+                instructions=SYSTEM_INSTRUCTIONS,
+                input=build_prompt(ticket_text, log_text, runbook_text),
+                temperature=0.2,
+            )
         )
     except (APIConnectionError, APITimeoutError) as exc:
         raise HTTPException(
@@ -184,3 +206,34 @@ async def analyze_support_context(
         ) from exc
 
     return getattr(response, "id", None), model, _parse_analysis(_response_text(response))
+
+
+async def _call_openai_with_retries(operation: Callable[[], Awaitable[T]]) -> T:
+    attempts = get_openai_retry_attempts()
+    for attempt in range(1, attempts + 1):
+        try:
+            return await operation()
+        except (APIConnectionError, APIStatusError, APITimeoutError) as exc:
+            if attempt == attempts or not _is_retryable_openai_error(exc):
+                raise
+
+            await asyncio.sleep(_retry_delay_seconds(attempt))
+
+    raise RuntimeError("OpenAI request retry attempts were exhausted.")
+
+
+def _is_retryable_openai_error(exc: Exception) -> bool:
+    if isinstance(exc, (APIConnectionError, APITimeoutError)):
+        return True
+
+    return isinstance(exc, APIStatusError) and exc.status_code in RETRYABLE_OPENAI_STATUS_CODES
+
+
+def _retry_delay_seconds(attempt: int) -> float:
+    base_delay = get_openai_retry_backoff_seconds()
+    if base_delay == 0:
+        return 0.0
+
+    exponential_delay = base_delay * (2 ** (attempt - 1))
+    jitter = random.uniform(0, base_delay)
+    return exponential_delay + jitter

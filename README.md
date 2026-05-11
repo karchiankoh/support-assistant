@@ -69,3 +69,10 @@ Retrieval settings:
 export SUPPORT_KB_TOP_K="4"
 export SUPPORT_KB_MIN_SCORE="0.2"
 ```
+
+OpenAI retry settings:
+
+```bash
+export OPENAI_RETRY_ATTEMPTS="3"
+export OPENAI_RETRY_BACKOFF_SECONDS="0.5"
+```
