@@ -19,7 +19,11 @@ Optional:
 export OPENAI_MODEL="gpt-4.1-mini"
 export OPENAI_EMBEDDING_MODEL="text-embedding-3-small"
 export SUPPORT_KB_DB_PATH="data/support_knowledge.db"
+export LOG_LEVEL="INFO"
 ```
+
+Logs are emitted as JSON. Each HTTP response includes an `X-Request-ID` header, and callers can pass
+their own `X-Request-ID` to correlate all logs for a request.
 
 For local development without calling the OpenAI API:
 

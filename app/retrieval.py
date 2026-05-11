@@ -1,3 +1,4 @@
+import logging
 import math
 import os
 
@@ -11,6 +12,7 @@ DEFAULT_MIN_SCORE = 0.45
 CHUNK_SIZE = 1800
 CHUNK_OVERLAP = 250
 MAX_QUERY_CHARS = 12000
+logger = logging.getLogger(__name__)
 
 
 def get_retrieval_top_k() -> int:
@@ -40,13 +42,33 @@ def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVE
 
 
 async def retrieve_support_context(query: str | None) -> tuple[str | None, list[RetrievedSource]]:
-    if is_dev_environment() or not query or not query.strip():
+    if is_dev_environment():
+        logger.info("Support context retrieval skipped in development environment")
+        return None, []
+
+    if not query or not query.strip():
+        logger.info("Support context retrieval skipped because query is empty")
         return None, []
 
     db_path = get_knowledge_db_path()
     if not db_path.exists():
+        logger.info(
+            "Support context retrieval skipped because knowledge database is missing",
+            extra={"knowledge_db_path": str(db_path)},
+        )
         return None, []
 
+    logger.info(
+        "Support context retrieval started",
+        extra={
+            "query_characters": len(query),
+            "embedded_query_characters": min(len(query), MAX_QUERY_CHARS),
+            "knowledge_db_path": str(db_path),
+            "embedding_model": get_embedding_model(),
+            "top_k": get_retrieval_top_k(),
+            "min_score": get_retrieval_min_score(),
+        },
+    )
     query_embedding = await create_embedding(query[:MAX_QUERY_CHARS])
     rows = load_chunks(get_embedding_model(), db_path)
     ranked = []
@@ -69,6 +91,15 @@ async def retrieve_support_context(query: str | None) -> tuple[str | None, list[
         for score, chunk in top_matches
     ]
     context = _format_retrieved_context(sources)
+    logger.info(
+        "Support context retrieval completed",
+        extra={
+            "candidate_chunk_count": len(rows),
+            "matching_chunk_count": len(ranked),
+            "returned_source_count": len(sources),
+            "top_score": round(top_matches[0][0], 4) if top_matches else None,
+        },
+    )
     return context, sources
 
 

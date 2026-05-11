@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import random
 from collections.abc import Awaitable, Callable
@@ -18,6 +19,7 @@ DEFAULT_OPENAI_RETRY_BACKOFF_SECONDS = 0.5
 DEV_ENVIRONMENT = "dev"
 RETRYABLE_OPENAI_STATUS_CODES = (408, 409, 429, 500, 502, 503, 504)
 T = TypeVar("T")
+logger = logging.getLogger(__name__)
 
 SYSTEM_INSTRUCTIONS = """
 You are a senior support engineer. Analyze support tickets and application logs.
@@ -63,6 +65,7 @@ def is_dev_environment() -> bool:
 
 def get_client() -> AsyncOpenAI:
     if not os.getenv("OPENAI_API_KEY"):
+        logger.error("OpenAI client requested without OPENAI_API_KEY")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="OPENAI_API_KEY is not configured.",
@@ -76,8 +79,17 @@ async def create_embedding(text: str) -> list[float]:
 
 async def embed_texts(texts: list[str]) -> list[list[float]]:
     if not texts:
+        logger.info("Embedding request skipped because no texts were provided")
         return []
 
+    logger.info(
+        "OpenAI embedding request started",
+        extra={
+            "embedding_model": get_embedding_model(),
+            "text_count": len(texts),
+            "total_characters": sum(len(text) for text in texts),
+        },
+    )
     client = get_client()
     try:
         response = await _call_openai_with_retries(
@@ -87,10 +99,22 @@ async def embed_texts(texts: list[str]) -> list[list[float]]:
             )
         )
     except (APIConnectionError, APITimeoutError) as exc:
+        logger.exception("OpenAI embeddings request failed because the API could not be reached")
         raise RuntimeError(f"Could not reach OpenAI embeddings API: {exc}") from exc
     except APIStatusError as exc:
+        logger.exception(
+            "OpenAI embeddings request failed with API status error",
+            extra={"status_code": exc.status_code},
+        )
         raise RuntimeError(f"OpenAI embeddings API error {exc.status_code}: {exc.message}") from exc
 
+    logger.info(
+        "OpenAI embedding request completed",
+        extra={
+            "embedding_model": get_embedding_model(),
+            "embedding_count": len(response.data),
+        },
+    )
     return [item.embedding for item in response.data]
 
 
@@ -123,9 +147,11 @@ def _parse_analysis(text: str) -> SupportAnalysis:
     try:
         payload = json.loads(text)
     except json.JSONDecodeError:
+        logger.warning("Model response was not valid JSON; attempting to extract JSON object")
         start = text.find("{")
         end = text.rfind("}")
         if start == -1 or end == -1 or end <= start:
+            logger.error("Model response did not contain a JSON object")
             return SupportAnalysis(
                 issue_summary="The model returned non-JSON output.",
                 debugging_steps=[],
@@ -181,8 +207,26 @@ async def analyze_support_context(
 ) -> tuple[str | None, str, SupportAnalysis]:
     model = get_model()
     if is_dev_environment():
+        logger.info(
+            "Analysis request handled with development mock response",
+            extra={
+                "model": model,
+                "ticket_characters": len(ticket_text or ""),
+                "log_characters": len(log_text or ""),
+                "runbook_characters": len(runbook_text or ""),
+            },
+        )
         return "mock-response-dev", model, _mock_analysis(ticket_text, log_text, runbook_text)
 
+    logger.info(
+        "OpenAI responses request started",
+        extra={
+            "model": model,
+            "ticket_characters": len(ticket_text or ""),
+            "log_characters": len(log_text or ""),
+            "runbook_characters": len(runbook_text or ""),
+        },
+    )
     client = get_client()
 
     try:
@@ -195,17 +239,30 @@ async def analyze_support_context(
             )
         )
     except (APIConnectionError, APITimeoutError) as exc:
+        logger.exception("OpenAI responses request failed because the API could not be reached")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Could not reach OpenAI: {exc}",
         ) from exc
     except APIStatusError as exc:
+        logger.exception(
+            "OpenAI responses request failed with API status error",
+            extra={"status_code": exc.status_code},
+        )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"OpenAI API error {exc.status_code}: {exc.message}",
         ) from exc
 
-    return getattr(response, "id", None), model, _parse_analysis(_response_text(response))
+    response_id = getattr(response, "id", None)
+    logger.info(
+        "OpenAI responses request completed",
+        extra={
+            "response_id": response_id,
+            "model": model,
+        },
+    )
+    return response_id, model, _parse_analysis(_response_text(response))
 
 
 async def _call_openai_with_retries(operation: Callable[[], Awaitable[T]]) -> T:
@@ -215,9 +272,27 @@ async def _call_openai_with_retries(operation: Callable[[], Awaitable[T]]) -> T:
             return await operation()
         except (APIConnectionError, APIStatusError, APITimeoutError) as exc:
             if attempt == attempts or not _is_retryable_openai_error(exc):
+                logger.exception(
+                    "OpenAI request failed",
+                    extra={
+                        "attempt": attempt,
+                        "max_attempts": attempts,
+                        "retryable": _is_retryable_openai_error(exc),
+                    },
+                )
                 raise
 
-            await asyncio.sleep(_retry_delay_seconds(attempt))
+            delay_seconds = _retry_delay_seconds(attempt)
+            logger.warning(
+                "OpenAI request failed; retrying",
+                extra={
+                    "attempt": attempt,
+                    "max_attempts": attempts,
+                    "delay_seconds": round(delay_seconds, 3),
+                    "retryable": True,
+                },
+            )
+            await asyncio.sleep(delay_seconds)
 
     raise RuntimeError("OpenAI request retry attempts were exhausted.")
 
