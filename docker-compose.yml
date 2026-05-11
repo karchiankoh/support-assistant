@@ -1,0 +1,18 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
+      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
+      SUPPORT_KB_DB_PATH: ${SUPPORT_KB_DB_PATH:-data/support_knowledge.db}
+      SUPPORT_KB_TOP_K: ${SUPPORT_KB_TOP_K:-4}
+      SUPPORT_KB_MIN_SCORE: ${SUPPORT_KB_MIN_SCORE:-0.2}
+      OPENAI_RETRY_ATTEMPTS: ${OPENAI_RETRY_ATTEMPTS:-3}
+      OPENAI_RETRY_BACKOFF_SECONDS: ${OPENAI_RETRY_BACKOFF_SECONDS:-0.5}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      APP_ENV: ${APP_ENV:-}
+    volumes:
+      - ./data:/app/data

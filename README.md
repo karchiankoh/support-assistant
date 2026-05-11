@@ -39,6 +39,24 @@ fastapi dev
 
 Open `http://127.0.0.1:8000/docs` for the interactive API docs.
 
+## Docker
+
+Build and run the API with Docker Compose:
+
+```bash
+docker compose up --build
+```
+
+Open `http://127.0.0.1:8000/docs` for the interactive API docs.
+
+The Compose setup mounts `./data` into the container so the local SQLite knowledge database persists across runs. Configure the app with the same environment variables shown above, either in your shell or in a local `.env` file.
+
+Build or refresh the knowledge index inside Docker:
+
+```bash
+docker compose run --rm api python scripts/ingest_knowledge.py
+```
+
 ## Endpoints
 
 - `GET /health` checks the service, configured model, and local knowledge database status.
