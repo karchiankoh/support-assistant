@@ -2,8 +2,9 @@ import logging
 import math
 import os
 
+from app.config import get_embedding_model, is_dev_environment
 from app.knowledge_store import get_knowledge_db_path, load_chunks
-from app.openai_client import create_embedding, get_embedding_model, is_dev_environment
+from app.openai_client import create_embedding
 from app.schemas import RetrievedSource
 
 

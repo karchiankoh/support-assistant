@@ -25,6 +25,9 @@ export LOG_LEVEL="INFO"
 Logs are emitted as JSON. Each HTTP response includes an `X-Request-ID` header, and callers can pass
 their own `X-Request-ID` to correlate all logs for a request.
 
+Successful OpenAI completion logs include token usage fields from the API response:
+`input_tokens`, `output_tokens`, `total_tokens`, `cached_input_tokens`, and `reasoning_tokens`.
+
 For local development without calling the OpenAI API:
 
 ```bash

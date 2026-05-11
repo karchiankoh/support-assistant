@@ -4,10 +4,11 @@ from typing import Annotated
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Request, status
 
+from app.config import get_model, is_dev_environment
 from app.files import UploadedDocument, combine_documents, read_upload
 from app.knowledge_store import get_knowledge_db_path
 from app.logging_config import configure_logging
-from app.openai_client import analyze_support_context, get_model, is_dev_environment
+from app.openai_client import analyze_support_context
 from app.retrieval import retrieve_support_context
 from app.request_context import request_id_context, request_path_context
 from app.schemas import AnalysisResponse

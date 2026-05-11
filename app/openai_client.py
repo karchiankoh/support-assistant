@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 import os
 import random
@@ -9,58 +8,26 @@ from typing import Any, TypeVar
 from fastapi import HTTPException, status
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
 
+from app.config import (
+    get_embedding_model,
+    get_model,
+    get_openai_retry_attempts,
+    get_openai_retry_backoff_seconds,
+    is_dev_environment,
+)
 from app.schemas import SupportAnalysis
+from app.support_analysis import (
+    SUPPORT_ANALYSIS_SYSTEM_INSTRUCTIONS,
+    build_prompt,
+    mock_analysis,
+    parse_analysis,
+    response_text,
+)
 
 
-DEFAULT_MODEL = "gpt-4.1-mini"
-DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
-DEFAULT_OPENAI_RETRY_ATTEMPTS = 3
-DEFAULT_OPENAI_RETRY_BACKOFF_SECONDS = 0.5
-DEV_ENVIRONMENT = "dev"
 RETRYABLE_OPENAI_STATUS_CODES = (408, 409, 429, 500, 502, 503, 504)
 T = TypeVar("T")
 logger = logging.getLogger(__name__)
-
-SYSTEM_INSTRUCTIONS = """
-You are a senior support engineer. Analyze support tickets and application logs.
-Return only valid JSON with this shape:
-{
-  "issue_summary": "string",
-  "likely_cause": "string or null",
-  "severity": "string or null",
-  "affected_components": ["string"],
-  "evidence": ["short facts quoted or paraphrased from the supplied files"],
-  "customer_facing_explanation": "string or null",
-  "debugging_steps": [{"step": "string", "rationale": "string or null"}]
-}
-
-Be concrete, avoid inventing facts, and prioritize steps a support engineer can run next.
-If evidence is missing, say what should be collected.
-""".strip()
-
-
-def get_model() -> str:
-    return os.getenv("OPENAI_MODEL", DEFAULT_MODEL)
-
-
-def get_embedding_model() -> str:
-    return os.getenv("OPENAI_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
-
-
-def get_openai_retry_attempts() -> int:
-    return max(1, int(os.getenv("OPENAI_RETRY_ATTEMPTS", str(DEFAULT_OPENAI_RETRY_ATTEMPTS))))
-
-
-def get_openai_retry_backoff_seconds() -> float:
-    return max(
-        0.0,
-        float(os.getenv("OPENAI_RETRY_BACKOFF_SECONDS", str(DEFAULT_OPENAI_RETRY_BACKOFF_SECONDS))),
-    )
-
-
-def is_dev_environment() -> bool:
-    environment = os.getenv("APP_ENV")
-    return environment is not None and environment.strip().lower() == DEV_ENVIRONMENT
 
 
 def get_client() -> AsyncOpenAI:
@@ -108,96 +75,20 @@ async def embed_texts(texts: list[str]) -> list[list[float]]:
         )
         raise RuntimeError(f"OpenAI embeddings API error {exc.status_code}: {exc.message}") from exc
 
+    usage = _extract_openai_token_usage(response)
     logger.info(
         "OpenAI embedding request completed",
         extra={
             "embedding_model": get_embedding_model(),
             "embedding_count": len(response.data),
+            "input_tokens": usage["input_tokens"],
+            "output_tokens": usage["output_tokens"],
+            "total_tokens": usage["total_tokens"],
+            "cached_input_tokens": usage["cached_input_tokens"],
+            "reasoning_tokens": usage["reasoning_tokens"],
         },
     )
     return [item.embedding for item in response.data]
-
-
-def build_prompt(ticket_text: str | None, log_text: str | None, runbook_text: str | None) -> str:
-    sections = []
-    if ticket_text:
-        sections.append(f"<support_ticket>\n{ticket_text}\n</support_ticket>")
-    if log_text:
-        sections.append(f"<logs>\n{log_text}\n</logs>")
-    if runbook_text:
-        sections.append(f"<retrieved_support_knowledge>\n{runbook_text}\n</retrieved_support_knowledge>")
-    return "\n\n".join(sections)
-
-
-def _response_text(response: Any) -> str:
-    output_text = getattr(response, "output_text", None)
-    if output_text:
-        return output_text
-
-    chunks: list[str] = []
-    for item in getattr(response, "output", []) or []:
-        for content in getattr(item, "content", []) or []:
-            text = getattr(content, "text", None)
-            if text:
-                chunks.append(text)
-    return "\n".join(chunks)
-
-
-def _parse_analysis(text: str) -> SupportAnalysis:
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError:
-        logger.warning("Model response was not valid JSON; attempting to extract JSON object")
-        start = text.find("{")
-        end = text.rfind("}")
-        if start == -1 or end == -1 or end <= start:
-            logger.error("Model response did not contain a JSON object")
-            return SupportAnalysis(
-                issue_summary="The model returned non-JSON output.",
-                debugging_steps=[],
-                raw_model_output=text,
-            )
-        payload = json.loads(text[start : end + 1])
-
-    analysis = SupportAnalysis.model_validate(payload)
-    analysis.raw_model_output = payload
-    return analysis
-
-
-def _mock_analysis(ticket_text: str | None, log_text: str | None, runbook_text: str | None) -> SupportAnalysis:
-    provided_sources = []
-    if ticket_text:
-        provided_sources.append("support ticket")
-    if log_text:
-        provided_sources.append("logs")
-    if runbook_text:
-        provided_sources.append("runbooks")
-
-    sources = ", ".join(provided_sources) if provided_sources else "no source text"
-    payload = {
-        "issue_summary": f"Mock development analysis generated from {sources}.",
-        "likely_cause": "Mock response: no OpenAI API call was made because APP_ENV is set to a development value.",
-        "severity": "mock",
-        "affected_components": ["development"],
-        "evidence": [
-            "Development mock mode is enabled.",
-            f"Received {len(ticket_text or '')} ticket characters and {len(log_text or '')} log characters.",
-        ],
-        "debugging_steps": [
-            {
-                "step": "Set APP_ENV to a non-development value to call the OpenAI API.",
-                "rationale": "Development mode intentionally returns a local mock response.",
-            },
-            {
-                "step": "Configure OPENAI_API_KEY before testing production-like behavior.",
-                "rationale": "The real OpenAI client requires an API key.",
-            },
-        ],
-    }
-
-    analysis = SupportAnalysis.model_validate(payload)
-    analysis.raw_model_output = payload
-    return analysis
 
 
 async def analyze_support_context(
@@ -216,7 +107,7 @@ async def analyze_support_context(
                 "runbook_characters": len(runbook_text or ""),
             },
         )
-        return "mock-response-dev", model, _mock_analysis(ticket_text, log_text, runbook_text)
+        return "mock-response-dev", model, mock_analysis(ticket_text, log_text, runbook_text)
 
     logger.info(
         "OpenAI responses request started",
@@ -233,7 +124,7 @@ async def analyze_support_context(
         response = await _call_openai_with_retries(
             lambda: client.responses.create(
                 model=model,
-                instructions=SYSTEM_INSTRUCTIONS,
+                instructions=SUPPORT_ANALYSIS_SYSTEM_INSTRUCTIONS,
                 input=build_prompt(ticket_text, log_text, runbook_text),
                 temperature=0.2,
             )
@@ -255,14 +146,55 @@ async def analyze_support_context(
         ) from exc
 
     response_id = getattr(response, "id", None)
+    usage = _extract_openai_token_usage(response)
     logger.info(
         "OpenAI responses request completed",
         extra={
             "response_id": response_id,
             "model": model,
+            "input_tokens": usage["input_tokens"],
+            "output_tokens": usage["output_tokens"],
+            "total_tokens": usage["total_tokens"],
+            "cached_input_tokens": usage["cached_input_tokens"],
+            "reasoning_tokens": usage["reasoning_tokens"],
         },
     )
-    return response_id, model, _parse_analysis(_response_text(response))
+    return response_id, model, parse_analysis(response_text(response))
+
+
+def _extract_openai_token_usage(response: Any) -> dict[str, int | None]:
+    usage = _get_usage_value(response, "usage")
+    input_token_details = _get_usage_value(usage, "input_tokens_details")
+    output_token_details = _get_usage_value(usage, "output_tokens_details")
+
+    return {
+        "input_tokens": _get_first_int_usage_value(usage, ("input_tokens", "prompt_tokens")),
+        "output_tokens": _get_int_usage_value(usage, "output_tokens"),
+        "total_tokens": _get_int_usage_value(usage, "total_tokens"),
+        "cached_input_tokens": _get_int_usage_value(input_token_details, "cached_tokens"),
+        "reasoning_tokens": _get_int_usage_value(output_token_details, "reasoning_tokens"),
+    }
+
+
+def _get_first_int_usage_value(source: Any, keys: tuple[str, ...]) -> int | None:
+    for key in keys:
+        value = _get_int_usage_value(source, key)
+        if value is not None:
+            return value
+    return None
+
+
+def _get_int_usage_value(source: Any, key: str) -> int | None:
+    value = _get_usage_value(source, key)
+    return value if isinstance(value, int) else None
+
+
+def _get_usage_value(source: Any, key: str) -> Any:
+    if source is None:
+        return None
+    if isinstance(source, dict):
+        return source.get(key)
+    return getattr(source, key, None)
 
 
 async def _call_openai_with_retries(operation: Callable[[], Awaitable[T]]) -> T:

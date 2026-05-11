@@ -7,10 +7,11 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from app.config import get_embedding_model
 from app.files import decode_text
 from app.knowledge_store import KnowledgeChunk, get_knowledge_db_path, init_db, upsert_chunks
 from app.logging_config import configure_logging
-from app.openai_client import embed_texts, get_embedding_model
+from app.openai_client import embed_texts
 from app.retrieval import chunk_text
 
 
